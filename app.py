@@ -9,7 +9,7 @@ CORS(app)
 # -----------------------------
 # Emergency vehicle information
 # -----------------------------
-emergency_vehicle = None
+emergency_vehicles = {}
 
 # -----------------------------
 # User location information
@@ -69,7 +69,7 @@ def geocode_place(place_name):
         "format": "json",
         "limit": 1,
         "countrycodes": "in",
-        "viewbox": "79.9,13.25,80.35,12.85",  # left,top,right,bottom around Chennai metro
+        "viewbox": "76.2,13.6,80.4,8.0",  # left,top,right,bottom — covers all of Tamil Nadu
         "bounded": 1
     }
     headers = {
@@ -358,7 +358,7 @@ def user_is_ahead(user_index, ambulance_index):
 @app.route("/emergency", methods=["POST"])
 def receive_emergency():
 
-    global emergency_vehicle
+    global emergency_vehicles
 
     data = request.json
 
@@ -406,7 +406,7 @@ def receive_emergency():
     else:
         route = create_route(source, destination, source_coords=source_coords)
 
-    emergency_vehicle = {
+    emergency_vehicles[vehicle_id] = {
 
         "vehicle_id": vehicle_id,
 
@@ -429,7 +429,7 @@ def receive_emergency():
 
         "message": "Emergency vehicle received",
 
-        "emergency": emergency_vehicle
+        "emergency": emergency_vehicles[vehicle_id]
     })
 
 # -----------------------------
@@ -438,19 +438,25 @@ def receive_emergency():
 @app.route("/emergency/location", methods=["POST"])
 def update_emergency_location():
 
-    global emergency_vehicle
-
-    if emergency_vehicle is None:
-
-        return jsonify({
-            "success": False,
-            "message": "No active emergency vehicle"
-        }), 404
+    global emergency_vehicles
 
     data = request.json
 
+    vehicle_id = data.get("vehicle_id")
     lat = data.get("lat")
     lng = data.get("lng")
+
+    if not vehicle_id:
+        return jsonify({
+            "success": False,
+            "message": "vehicle_id is required"
+        }), 400
+
+    if vehicle_id not in emergency_vehicles:
+        return jsonify({
+            "success": False,
+            "message": "No active emergency vehicle with that vehicle_id"
+        }), 404
 
     if lat is None or lng is None:
 
@@ -459,7 +465,7 @@ def update_emergency_location():
             "message": "lat and lng are required"
         }), 400
 
-    emergency_vehicle["location"] = {
+    emergency_vehicles[vehicle_id]["location"] = {
 
         "lat": lat,
 
@@ -470,7 +476,7 @@ def update_emergency_location():
 
         "success": True,
 
-        "location": emergency_vehicle["location"]
+        "location": emergency_vehicles[vehicle_id]["location"]
     })
 
 
@@ -517,7 +523,7 @@ def update_user_location():
 # -----------------------------
 def check_user_for_alert(user_id, lat, lng):
 
-    if emergency_vehicle is None:
+    if not emergency_vehicles:
 
         return {
 
@@ -528,127 +534,77 @@ def check_user_for_alert(user_id, lat, lng):
             "reason": "No active emergency vehicle"
         }
 
-    if not emergency_vehicle["active"]:
-
-        return {
-
-            "success": True,
-
-            "alert": False,
-
-            "reason": "Emergency vehicle is inactive"
-        }
-
-    route = emergency_vehicle["route"]
-
-    ambulance_lat = emergency_vehicle["location"]["lat"]
-    ambulance_lng = emergency_vehicle["location"]["lng"]
-
-    # Check user is on the same road path
-    on_route, user_index, road_distance = user_on_route(
-        lat,
-        lng,
-        route
-    )
-
-    if not on_route:
-
-        return {
-
-            "success": True,
-
-            "alert": False,
-
-            "reason": "User is not on emergency vehicle path",
-
-            "distance_from_route_km": round(road_distance, 3)
-        }
-
-    # Find ambulance position on route
-    ambulance_index, ambulance_route_distance = nearest_route_index(
-        ambulance_lat,
-        ambulance_lng,
-        route
-    )
-
-    # Check whether user is ahead
-    ahead = user_is_ahead(
-        user_index,
-        ambulance_index
-    )
-
-    if not ahead:
-
-        return {
-
-            "success": True,
-
-            "alert": False,
-
-            "reason": "User is behind emergency vehicle"
-        }
-
-    # Calculate direct distance
-    distance_to_ambulance = distance_km(
-        lat,
-        lng,
-        ambulance_lat,
-        ambulance_lng
-    )
-
-    # Warning distance
     WARNING_DISTANCE_KM = 5
+    best_alert = None
+    best_distance = None
+    closest_reason = "No active emergency vehicle"
+    closest_distance_from_route = None
 
-    if distance_to_ambulance > WARNING_DISTANCE_KM:
+    for vehicle_id, vehicle in emergency_vehicles.items():
 
-        return {
+        if not vehicle["active"]:
+            continue
 
-            "success": True,
+        route = vehicle["route"]
 
-            "alert": False,
+        ambulance_lat = vehicle["location"]["lat"]
+        ambulance_lng = vehicle["location"]["lng"]
 
-            "reason": "User is too far from emergency vehicle",
+        on_route, user_index, road_distance = user_on_route(lat, lng, route)
 
-            "distance_km": round(
-                distance_to_ambulance,
-                3
-            )
-        }
+        if not on_route:
+            if closest_distance_from_route is None or road_distance < closest_distance_from_route:
+                closest_distance_from_route = road_distance
+                closest_reason = "User is not on emergency vehicle path"
+            continue
 
-    # User should receive alert
-    return {
+        ambulance_index, ambulance_route_distance = nearest_route_index(
+            ambulance_lat, ambulance_lng, route
+        )
 
+        ahead = user_is_ahead(user_index, ambulance_index)
+
+        if not ahead:
+            closest_reason = "User is behind emergency vehicle"
+            continue
+
+        distance_to_ambulance = distance_km(lat, lng, ambulance_lat, ambulance_lng)
+
+        if distance_to_ambulance > WARNING_DISTANCE_KM:
+            closest_reason = "User is too far from emergency vehicle"
+            continue
+
+        # This vehicle qualifies for an alert — keep the closest one if multiple do.
+        if best_distance is None or distance_to_ambulance < best_distance:
+            best_distance = distance_to_ambulance
+            best_alert = {
+                "success": True,
+                "alert": True,
+                "reason": "Emergency vehicle is approaching on your path",
+                "user_id": user_id,
+                "distance_km": round(distance_to_ambulance, 3),
+                "emergency": {
+                    "vehicle_id": vehicle["vehicle_id"],
+                    "source": vehicle["source"],
+                    "destination": vehicle["destination"],
+                    "level": vehicle["level"]
+                },
+                "message": "Emergency vehicle approaching. Please give way."
+            }
+
+    if best_alert is not None:
+        return best_alert
+
+    result = {
         "success": True,
-
-        "alert": True,
-
-        "reason": "Emergency vehicle is approaching on your path",
-
-        "user_id": user_id,
-
-        "distance_km": round(
-            distance_to_ambulance,
-            3
-        ),
-
-        "emergency": {
-
-            "vehicle_id":
-                emergency_vehicle["vehicle_id"],
-
-            "source":
-                emergency_vehicle["source"],
-
-            "destination":
-                emergency_vehicle["destination"],
-
-            "level":
-                emergency_vehicle["level"]
-        },
-
-        "message":
-            "Emergency vehicle approaching. Please give way."
+        "alert": False,
+        "reason": closest_reason
     }
+
+    if closest_distance_from_route is not None:
+        result["distance_from_route_km"] = round(closest_distance_from_route, 3)
+
+    return result
 
 
 # -----------------------------
@@ -661,9 +617,8 @@ def get_emergency():
 
         "success": True,
 
-        "emergency": emergency_vehicle
+        "emergencies": list(emergency_vehicles.values())
     })
-
 
 # -----------------------------
 # Stop emergency
@@ -671,19 +626,31 @@ def get_emergency():
 @app.route("/emergency/stop", methods=["POST"])
 def stop_emergency():
 
-    global emergency_vehicle
+    global emergency_vehicles
 
-    if emergency_vehicle is not None:
+    data = request.json or {}
+    vehicle_id = data.get("vehicle_id")
 
-        emergency_vehicle["active"] = False
-
-    return jsonify({
-
-        "success": True,
-
-        "message": "Emergency vehicle stopped"
-    })
-
+    if vehicle_id:
+        if vehicle_id in emergency_vehicles:
+            emergency_vehicles[vehicle_id]["active"] = False
+            return jsonify({
+                "success": True,
+                "message": f"Emergency vehicle {vehicle_id} stopped"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "No active emergency vehicle with that vehicle_id"
+            }), 404
+    else:
+        # No vehicle_id given — stop all active emergencies (backward-compatible testing convenience).
+        for v in emergency_vehicles.values():
+            v["active"] = False
+        return jsonify({
+            "success": True,
+            "message": "All emergency vehicles stopped"
+        })
 
 # -----------------------------
 # Home page
