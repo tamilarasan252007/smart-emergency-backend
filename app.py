@@ -348,10 +348,7 @@ def user_on_route(lat, lng, route):
 # ahead of ambulance
 # -----------------------------
 def user_is_ahead(user_index, ambulance_index):
-
-    return user_index > ambulance_index
-
-
+    return user_index >= ambulance_index
 # -----------------------------
 # Emergency vehicle endpoint
 # -----------------------------
