@@ -559,13 +559,14 @@ def check_user_for_alert(user_id, lat, lng):
             ambulance_lat, ambulance_lng, route
         )
 
-        ahead = user_is_ahead(user_index, ambulance_index)
+               distance_to_ambulance = distance_km(lat, lng, ambulance_lat, ambulance_lng)
 
-        if not ahead:
+        ahead = user_is_ahead(user_index, ambulance_index)
+        very_close = distance_to_ambulance <= 1.0  # within 1km overrides index ordering
+
+        if not ahead and not very_close:
             closest_reason = "User is behind emergency vehicle"
             continue
-
-        distance_to_ambulance = distance_km(lat, lng, ambulance_lat, ambulance_lng)
 
         if distance_to_ambulance > WARNING_DISTANCE_KM:
             closest_reason = "User is too far from emergency vehicle"
